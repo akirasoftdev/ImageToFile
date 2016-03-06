@@ -7,19 +7,26 @@ UUID_SIZE = 16
 MAX_FILE_NAME_SIZE = 128
 SEQUENTIAL_NUMBER_SIZE = 1
 FILE_SIZE_SIZE = 8
+HEADER_SIZE = 1
 NAMELEN_SIZE = 1
 BYTE_PER_PIXEL = 4
 
 class Header:
     def __init__(self):
-        self.filename = b''
         self.uuid = ''
         self.seqnum = 1
         self.lastseqnum = 0
         self.filesize = 0
+        self.bodysize = 0
+        self.headersize = 0
+        self.filename = b''
 
     def get_size(self):
-        return UUID_SIZE + SEQUENTIAL_NUMBER_SIZE * 2 + len(self.filename) + NAMELEN_SIZE + FILE_SIZE_SIZE
+        temp = UUID_SIZE + SEQUENTIAL_NUMBER_SIZE * 2 + \
+            (FILE_SIZE_SIZE * 2) + HEADER_SIZE + NAMELEN_SIZE + len(self.filename)
+        padding = (BYTE_PER_PIXEL - (temp % BYTE_PER_PIXEL) % BYTE_PER_PIXEL)
+        return temp + padding
+
 
     def from_bytes(data):
         header = Header()
@@ -42,6 +49,15 @@ class Header:
         header.filesize = int.from_bytes(filesize_as_array, 'little')
         offset += FILE_SIZE_SIZE
 
+        bodysize_as_array = bytearray()
+        for i in range(offset, offset + FILE_SIZE_SIZE):
+            bodysize_as_array += get_bytes_from_image(data, i)
+        header.bodysize = int.from_bytes(bodysize_as_array, 'little')
+        offset += FILE_SIZE_SIZE
+
+        header.headersize = int.from_bytes(get_bytes_from_image(data, offset), 'little')
+        offset += HEADER_SIZE
+
         namelen = get_bytes_from_image(data, offset)
         offset += NAMELEN_SIZE
 
@@ -54,24 +70,39 @@ class Header:
 def get_bytes_from_image(data, index):
     num_of_pixel = math.floor(index / BYTE_PER_PIXEL)
     index_of_color = index % BYTE_PER_PIXEL
-    return data[num_of_pixel][index_of_color].to_bytes(1, 'little')
+    ret = bytes(data[num_of_pixel])[index_of_color:index_of_color+1]
+    return ret
 
 def transport_data(header, image, output_file, remaining_size):
-    outbuff = bytearray()
-    offset = header.get_size()
-    for i in range(0, image.width * image.height * BYTE_PER_PIXEL - offset):
-        outbuff += get_bytes_from_image(image.getdata(), offset + i)
+    header_size = header.get_size()
+    offset_as_pixel = int(header_size / BYTE_PER_PIXEL)
+    offset_as_byte = header_size % BYTE_PER_PIXEL
 
-    write_size = len(outbuff)
-    if (write_size > remaining_size):
-        write_size = remaining_size
-    output_file.write(outbuff[:write_size])
-    return write_size
+    transport_size = header.bodysize
 
-def get_filename(header):
-    return header.uuid.hex + '_' + str(header.seqnum) + '.png'
+    start_index = int(header_size / BYTE_PER_PIXEL)
+    end_index = math.ceil((header_size + transport_size) / BYTE_PER_PIXEL)
+    for i in range(start_index, end_index):
+        start_pos = 0
+        end_pos = 4
+        if i == start_index:
+            start_pos = offset_as_byte
+        elif i == (end_index - 1):
+            end_pos = transport_size % BYTE_PER_PIXEL
+            if (end_pos == 0):
+                end_pos = BYTE_PER_PIXEL
+            print("end_pos = %d" % end_pos)
+            if (end_pos != 4):
+            	print("break")
+        output_file.write(bytes(image.getdata()[i][start_pos:end_pos]))
+    return transport_size
+
+def get_filename(uuid, seqnum):
+    return uuid.hex + '_' + str(seqnum) + '.png'
 
 def get_filepath(path):
+    if (path.rfind('\\') == -1):
+        return ''
     return path[:path.rfind('\\')]
 
 def load_fileheader(file_path):
@@ -87,14 +118,20 @@ def main():
     args = parser.parse_args()
 
     header = load_fileheader(args.in_file_path)
+    uuid = header.uuid
     path = get_filepath(args.in_file_path)
-    filename = get_filename(header)
+    filename = get_filename(uuid, header.seqnum)
     output_file = open(header.filename.decode(), 'wb')
     remaining_size = header.filesize
+    lastseqnum = header.lastseqnum
 
-    for i in range(header.seqnum, header.lastseqnum + 1):
+    for i in range(1, lastseqnum + 1):
         header.seqnum = i
-        full_path = path + '\\' + get_filename(header)
+        if (len(path) == 0):
+            full_path = get_filename(uuid, i)
+        else:
+            full_path = path + '\\' + get_filename(uuid, i)
+        header = load_fileheader(full_path)
         input_file = open(full_path, 'rb')
         image = Image.open(input_file)
         wrote_size = transport_data(header, image, output_file, remaining_size)
